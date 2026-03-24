@@ -872,6 +872,35 @@ install_vnc() {
     
     local xstartup_path="$TARGET_HOME/.vnc/xstartup"
     run_cmd "touch $xstartup_path"
+    
+    # 选择可用桌面启动命令
+    local start_cmd="${DESKTOP_CMD:-}"
+    if [[ -z "$start_cmd" ]]; then
+        if command -v startxfce4 >/dev/null 2>&1; then
+            start_cmd="startxfce4"
+        elif command -v startplasma-x11 >/dev/null 2>&1; then
+            start_cmd="startplasma-x11"
+        elif command -v startkde >/dev/null 2>&1; then
+            start_cmd="startkde"
+        elif command -v mate-session >/dev/null 2>&1; then
+            start_cmd="mate-session"
+        elif command -v startlxqt >/dev/null 2>&1; then
+            start_cmd="startlxqt"
+        elif command -v gnome-session >/dev/null 2>&1; then
+            start_cmd="gnome-session"
+        elif command -v lxsession >/dev/null 2>&1; then
+            start_cmd="lxsession"
+        elif command -v cinnamon-session >/dev/null 2>&1; then
+            start_cmd="cinnamon-session"
+        elif command -v startdde >/dev/null 2>&1; then
+            start_cmd="startdde"
+        elif command -v ukui-session >/dev/null 2>&1; then
+            start_cmd="ukui-session"
+        else
+            start_cmd="startxfce4"
+        fi
+    fi
+    
     # 根据所选桌面生成 xstartup
     cat > /tmp/xstartup.tmp <<EOF
 #!/usr/bin/env bash
