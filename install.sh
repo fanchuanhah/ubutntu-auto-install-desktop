@@ -552,7 +552,7 @@ install_desktop() {
     print_title "安装桌面环境: $DESKTOP_TYPE"
     case "$DESKTOP_TYPE" in
         xfce4)
-            run_cmd "apt install -y xfce4 xfce4-goodies xfce4-terminal"
+            run_cmd "apt install -y xfce4 xfce4-goodies xfce4-terminal fonts-noto-cjk fonts-noto-color-emoji"
             DESKTOP_CMD="startxfce4"
             ;;
         xubuntu)
@@ -560,13 +560,13 @@ install_desktop() {
             DESKTOP_CMD="startxfce4"
             ;;
         xfce-lite)
-            run_cmd "apt install -y --no-install-recommends xfce4 xfce4-terminal"
+            run_cmd "apt install -y --no-install-recommends xfce4 xfce4-terminal fonts-noto-cjk fonts-noto-color-emoji"
             DESKTOP_CMD="startxfce4"
             ;;
         lxqt)
             run_cmd "add-apt-repository ppa:lxqt/stable -y"
             run_cmd "apt update"
-            run_cmd "apt install lxqt -y"
+            run_cmd "apt install -y lxqt-core qterminal xfwm4 xfwm4-theme-breeze lxqt-config fonts-noto-cjk"
             DESKTOP_CMD="startlxqt"
             ;;
         kde-full)
@@ -578,15 +578,15 @@ install_desktop() {
             DESKTOP_CMD="startkde"
             ;;
         kde-plasma)
-            run_cmd "apt install kde-plasma-desktop -y"
-            DESKTOP_CMD="startkde"
+            run_cmd "apt install -y kde-plasma-desktop fonts-noto-cjk fonts-noto-color-emoji"
+            DESKTOP_CMD="startplasma-x11"
             ;;
         mate-core)
-            run_cmd "apt update && apt install mate-desktop-environment-core -y"
+            run_cmd "apt update && apt install -y mate-desktop-environment-core mate-terminal fonts-noto-cjk"
             DESKTOP_CMD="mate-session"
             ;;
         mate-full)
-            run_cmd "apt install mate-desktop-environment-extras -y"
+            run_cmd "apt install -y mate-desktop-environment-extras mate-terminal fonts-noto-cjk"
             DESKTOP_CMD="mate-session"
             ;;
         gnome-ubuntu)
@@ -594,8 +594,24 @@ install_desktop() {
             DESKTOP_CMD="gnome-session"
             ;;
         gnome-core)
-            run_cmd "apt install ubuntu-desktop -y"
+            run_cmd "apt install -y --no-install-recommends xorg gnome-core gnome-session gnome-shell gnome-tweak-tool fonts-noto-cjk fonts-noto-color-emoji"
             DESKTOP_CMD="gnome-session"
+            ;;
+        lxde)
+            run_cmd "apt install -y lxde-core lxterminal fonts-noto-cjk"
+            DESKTOP_CMD="lxsession"
+            ;;
+        cinnamon)
+            run_cmd "apt install -y --no-install-recommends cinnamon cinnamon-desktop-environment fonts-noto-cjk"
+            DESKTOP_CMD="cinnamon-session"
+            ;;
+        deepin)
+            run_cmd "apt install -y ubuntudde-dde deepin-terminal fonts-noto-cjk"
+            DESKTOP_CMD="startdde"
+            ;;
+        ukui)
+            run_cmd "apt install -y ukui-session-manager ukui-menu ukui-control-center ukui-screensaver ukui-themes peony fonts-noto-cjk"
+            DESKTOP_CMD="ukui-session"
             ;;
     esac
     run_cmd "apt-get install -y dbus-x11"
@@ -615,6 +631,14 @@ install_desktop() {
             DESKTOP_CMD="startlxqt"
         elif command -v mate-session >/dev/null 2>&1; then
             DESKTOP_CMD="mate-session"
+        elif command -v lxsession >/dev/null 2>&1; then
+            DESKTOP_CMD="lxsession"
+        elif command -v cinnamon-session >/dev/null 2>&1; then
+            DESKTOP_CMD="cinnamon-session"
+        elif command -v startdde >/dev/null 2>&1; then
+            DESKTOP_CMD="startdde"
+        elif command -v ukui-session >/dev/null 2>&1; then
+            DESKTOP_CMD="ukui-session"
         elif command -v startxfce4 >/dev/null 2>&1; then
             DESKTOP_CMD="startxfce4"
         elif command -v gnome-session >/dev/null 2>&1; then
