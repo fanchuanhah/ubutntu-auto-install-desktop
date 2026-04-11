@@ -1,8 +1,12 @@
 #!/bin/bash
 # ==================================================
 # Ubuntu 桌面环境一键安装脚本（多桌面 + VNC + noVNC + 应用安装）
-# 版本: 0.2-fixed
-# 修复内容: 自动安装 Fcitx5 输入法，VNC xstartup 使用用户定制模板
+# 版本: 0.6-final
+# 修改内容:
+#   1. 修复符号链接错误
+#   2. 双密码风险警告（用户密码 + VNC 密码）
+#   3. 安装统计上报与展示
+#   4. 新增问题反馈功能（fantools report 及菜单选项）
 # ==================================================
 
 AUTO_DESKTOP_TYPE="xfce4"
@@ -53,7 +57,9 @@ declare -g VNC_START_NOW=""
 declare -g INSTALL_LANG=""
 declare -g INSTALL_NOVNC=""
 declare -g INSTALL_INPUT_METHOD=""
+declare -g INPUT_METHOD_TYPE=""
 declare -g NOVNC_PORT=""
+declare -g USER_PASS_IS_DEFAULT="false"
 
 print_info() { echo -e "${GREEN}[信息]${NC} $1"; }
 print_warn() { echo -e "${YELLOW}[警告]${NC} $1"; }
@@ -201,13 +207,7 @@ run_cmd() {
 is_pkg_installed() { dpkg -l "$1" 2>/dev/null | grep -q ^ii; }
 is_cmd_installed() { command -v "$1" >/dev/null 2>&1; }
 
-check_lockfile() { 
-    if [[ -f "$LOCKFILE" ]]; then
-        return 0
-    else
-        return 1
-    fi
-}
+check_lockfile() { [[ -f "$LOCKFILE" ]]; }
 
 read_lockfile() {
     if [[ ! -f "$LOCKFILE" ]]; then
@@ -222,13 +222,19 @@ read_lockfile() {
 
 generate_lockfile() {
     local install_time=$(date '+%Y-%m-%d %H:%M:%S')
+    local pass_to_write
+    if [[ "$VNC_PASSWORD" == "123456" ]]; then
+        pass_to_write="$VNC_PASSWORD"
+    else
+        pass_to_write="custom"
+    fi
     cat > "$LOCKFILE" <<EOF
 {
     "install_time": "$install_time",
     "install_user": "$TARGET_USER",
     "desktop": "$DESKTOP_TYPE",
     "vnc_port": ${VNC_PORT:-null},
-    "vnc_password": "${VNC_PASSWORD:-123456}",
+    "vnc_password": "${pass_to_write}",
     "browser": "${BROWSER_CHOICE:-none}",
     "common_software": ${INSTALL_COMMON_SOFT:-false},
     "language_pack": ${INSTALL_LANG:-false},
@@ -244,11 +250,54 @@ get_public_ip() {
     curl -s --max-time 2 ifconfig.me || curl -s --max-time 2 icanhazip.com || echo "无法获取公网IP"
 }
 
+urlencode() {
+    local string="$1"
+    local strlen=${#string}
+    local encoded=""
+    local pos c o
+
+    for (( pos=0 ; pos<strlen ; pos++ )); do
+        c=${string:$pos:1}
+        case "$c" in
+            [-_.~a-zA-Z0-9] ) o="$c" ;;
+            * )               printf -v o '%%%02x' "'$c"
+        esac
+        encoded+="$o"
+    done
+    echo "$encoded"
+}
+
+send_install_stat() {
+    local ip="$1"
+    local url="https://t.802213.xyz/zm/index.php?add=$ip"
+    local response
+    response=$(curl -s --max-time 5 "$url" 2>/dev/null)
+    if [[ -n "$response" ]]; then
+        local total_installs=$(echo "$response" | sed -n '1p')
+        local today_installs=$(echo "$response" | sed -n '2p')
+        if [[ -n "$total_installs" && -n "$today_installs" ]]; then
+            echo -e "${CYAN}[统计] 今日共安装 ${today_installs} 台机，共安装 ${total_installs} 台机${NC}"
+        fi
+    fi
+}
+
+send_feedback() {
+    local ip="$1"
+    local text="$2"
+    local encoded_text=$(urlencode "$text")
+    local url="https://t.802213.xyz/zm/index.php?report=$ip&text=$encoded_text"
+    echo -e "${YELLOW}正在提交问题反馈...${NC}"
+    if curl -s --max-time 5 "$url" >/dev/null 2>&1; then
+        print_success "反馈已提交，感谢您的支持！"
+    else
+        print_warn "反馈提交失败，您可手动访问以下链接："
+        echo "$url"
+    fi
+}
+
 detect_existing_lockfile() {
     local locks=()
-    if [[ -f "/root/vncinstall.lock" ]]; then
-        locks+=("/root/vncinstall.lock")
-    fi
+    [[ -f "/root/vncinstall.lock" ]] && locks+=("/root/vncinstall.lock")
     for user_home in /home/*; do
         if [[ -d "$user_home" && -f "$user_home/vncinstall.lock" ]]; then
             locks+=("$user_home/vncinstall.lock")
@@ -290,16 +339,8 @@ detect_existing_lockfile() {
 setup_user_permissions() {
     if [[ -n "$TARGET_USER" ]]; then
         print_info "已指定用户: $TARGET_USER，跳过用户选择"
-        if [[ -z "$TARGET_HOME" ]]; then
-            if [[ "$TARGET_USER" == "root" ]]; then
-                TARGET_HOME="/root"
-            else
-                TARGET_HOME="/home/$TARGET_USER"
-            fi
-        fi
-        if [[ -z "$LOCKFILE" ]]; then
-            LOCKFILE="$TARGET_HOME/vncinstall.lock"
-        fi
+        [[ -z "$TARGET_HOME" ]] && TARGET_HOME=$(eval echo ~$TARGET_USER)
+        [[ -z "$LOCKFILE" ]] && LOCKFILE="$TARGET_HOME/vncinstall.lock"
         export TARGET_USER TARGET_HOME LOCKFILE
         return 0
     fi
@@ -317,10 +358,7 @@ setup_user_permissions() {
         elif [[ $res -eq 0 ]]; then
             while true; do
                 new_user=$(ask_input "请输入要使用的用户名" "input_username" "")
-                if [[ $? -eq 1 ]]; then
-                    BACK_TO_PREV=0
-                    continue
-                fi
+                [[ $? -eq 1 ]] && BACK_TO_PREV=0 && continue
                 
                 if id "$new_user" &>/dev/null; then
                     print_warn "用户 $new_user 已存在。"
@@ -352,6 +390,7 @@ setup_user_permissions() {
                         TARGET_USER="$new_user"
                         TARGET_HOME="/home/$new_user"
                         LOCKFILE="$TARGET_HOME/vncinstall.lock"
+                        [[ "$new_pass" == "123456" ]] && USER_PASS_IS_DEFAULT="true"
                         print_success "用户 $TARGET_USER 创建完成并已加入 sudo 组。"
                         break 2
                     done
@@ -378,10 +417,7 @@ setup_user_permissions() {
             else
                 while true; do
                     new_user=$(ask_input "请输入要使用的用户名" "input_new_username" "")
-                    if [[ $? -eq 1 ]]; then
-                        BACK_TO_PREV=0
-                        continue
-                    fi
+                    [[ $? -eq 1 ]] && BACK_TO_PREV=0 && continue
                     
                     if id "$new_user" &>/dev/null; then
                         print_warn "用户 $new_user 已存在。"
@@ -409,6 +445,7 @@ setup_user_permissions() {
                             TARGET_USER="$new_user"
                             TARGET_HOME="/home/$new_user"
                             LOCKFILE="$TARGET_HOME/vncinstall.lock"
+                            [[ "$new_pass" == "123456" ]] && USER_PASS_IS_DEFAULT="true"
                             print_success "用户 $TARGET_USER 创建完成并已加入 sudo 组。"
                             break 2
                         done
@@ -431,38 +468,29 @@ create_app_desktop() {
     local target_name="$3"
     local desktop_dir="$TARGET_HOME/Desktop"
     
-    if [[ -z "$target_name" ]]; then
-        target_name=$(basename "$source_desktop")
-    fi
-    
-    if [[ ! -f "$source_desktop" ]]; then
-        print_warn "未找到 $app_name 的桌面文件: $source_desktop，跳过创建快捷方式"
-        return
-    fi
-    
+    [[ -z "$target_name" ]] && target_name=$(basename "$source_desktop")
+    [[ ! -f "$source_desktop" ]] && print_warn "未找到 $app_name 的桌面文件" && return
+
     if [[ "$TARGET_USER" == "root" ]]; then
         mkdir -p "$desktop_dir"
     else
         sudo -u "$TARGET_USER" mkdir -p "$desktop_dir"
     fi
-    
+
     local target_path="$desktop_dir/$target_name"
     if [[ "$TARGET_USER" == "root" ]]; then
         cp "$source_desktop" "$target_path" 2>/dev/null
     else
         sudo -u "$TARGET_USER" cp "$source_desktop" "$target_path" 2>/dev/null
     fi
-    
-    if [[ ! -f "$target_path" ]]; then
-        print_error "复制 $app_name 桌面文件失败"
-        return
-    fi
-    
+
+    [[ ! -f "$target_path" ]] && print_error "复制 $app_name 桌面文件失败" && return
+
     if [[ "$TARGET_USER" == "root" && "$app_name" =~ (Chrome|Edge|Firefox|Cursor) ]]; then
         sed -i '/^Exec=/ s/$/ --no-sandbox/' "$target_path"
         print_info "为 root 用户的 $app_name 添加 --no-sandbox 启动参数"
     fi
-    
+
     chmod +x "$target_path"
     chown "$TARGET_USER":"$TARGET_USER" "$target_path" 2>/dev/null || true
     print_success "已创建 $app_name 桌面快捷方式"
@@ -605,34 +633,6 @@ install_desktop() {
             ;;
     esac
     run_cmd "apt-get install -y dbus-x11"
-
-    if command -v "$DESKTOP_CMD" >/dev/null 2>&1; then
-        :
-    else
-        if command -v startplasma-x11 >/dev/null 2>&1; then
-            DESKTOP_CMD="startplasma-x11"
-        elif command -v startplasma-wayland >/dev/null 2>&1; then
-            DESKTOP_CMD="startplasma-wayland"
-        elif command -v startkde >/dev/null 2>&1; then
-            DESKTOP_CMD="startkde"
-        elif command -v startlxqt >/dev/null 2>&1; then
-            DESKTOP_CMD="startlxqt"
-        elif command -v mate-session >/dev/null 2>&1; then
-            DESKTOP_CMD="mate-session"
-        elif command -v lxsession >/dev/null 2>&1; then
-            DESKTOP_CMD="lxsession"
-        elif command -v cinnamon-session >/dev/null 2>&1; then
-            DESKTOP_CMD="cinnamon-session"
-        elif command -v startdde >/dev/null 2>&1; then
-            DESKTOP_CMD="startdde"
-        elif command -v ukui-session >/dev/null 2>&1; then
-            DESKTOP_CMD="ukui-session"
-        elif command -v startxfce4 >/dev/null 2>&1; then
-            DESKTOP_CMD="startxfce4"
-        elif command -v gnome-session >/dev/null 2>&1; then
-            DESKTOP_CMD="gnome-session"
-        fi
-    fi
 }
 
 install_qq() {
@@ -755,31 +755,97 @@ install_ibus() {
     fi
     run_cmd "update-locale LANG=zh_CN.UTF-8 LC_ALL=zh_CN.UTF-8"
     run_cmd "im-config -s ibus"
-    
-    local profile_file="$TARGET_HOME/.xprofile"
-    if [[ ! -f "$profile_file" ]]; then
-        profile_file="$TARGET_HOME/.profile"
-    fi
-    if ! grep -q "ibus-daemon" "$profile_file" 2>/dev/null; then
-        echo '' >> "$profile_file"
-        echo '# 自动启动 IBus 输入法' >> "$profile_file"
-        echo 'export GTK_IM_MODULE=ibus' >> "$profile_file"
-        echo 'export QT_IM_MODULE=ibus' >> "$profile_file"
-        echo 'export XMODIFIERS=@im=ibus' >> "$profile_file"
-        echo 'ibus-daemon -drx' >> "$profile_file"
-    fi
-    
     configure_chinese_locale_for_user
-    
     print_success "IBus 安装完成"
+}
+
+configure_fcitx5_left_shift() {
+    local fcitx_config_dir="$TARGET_HOME/.config/fcitx5"
+    local config_file="$fcitx_config_dir/config"
+    
+    if [[ "$TARGET_USER" == "root" ]]; then
+        mkdir -p "$fcitx_config_dir"
+    else
+        sudo -u "$TARGET_USER" mkdir -p "$fcitx_config_dir"
+    fi
+    
+    cat > /tmp/fcitx5_config <<'EOF'
+[Hotkey]
+EnumerateWithTriggerKeys=True
+EnumerateForwardKeys=
+EnumerateBackwardKeys=
+EnumerateSkipFirst=False
+
+[Hotkey/TriggerKeys]
+0=Shift+Shift_L
+1=Zenkaku_Hankaku
+2=Hangul
+
+[Hotkey/AltTriggerKeys]
+0=Shift_L
+
+[Hotkey/EnumerateGroupForwardKeys]
+0=Super+space
+
+[Hotkey/EnumerateGroupBackwardKeys]
+0=Shift+Super+space
+
+[Hotkey/ActivateKeys]
+0=Hangul_Hanja
+
+[Hotkey/DeactivateKeys]
+0=Hangul_Romaja
+
+[Hotkey/PrevPage]
+0=Up
+
+[Hotkey/NextPage]
+0=Down
+
+[Hotkey/PrevCandidate]
+0=Shift+Tab
+
+[Hotkey/NextCandidate]
+0=Tab
+
+[Hotkey/TogglePreedit]
+0=Control+Alt+P
+
+[Behavior]
+ActiveByDefault=False
+ShareInputState=No
+PreeditEnabledByDefault=True
+ShowInputMethodInformation=True
+showInputMethodInformationWhenFocusIn=False
+CompactInputMethodInformation=True
+ShowFirstInputMethodInformation=True
+DefaultPageSize=5
+OverrideXkbOption=False
+CustomXkbOption=
+EnabledAddons=
+DisabledAddons=
+PreloadInputMethod=True
+AllowInputMethodForPassword=False
+ShowPreeditForPassword=False
+AutoSavePeriod=30
+EOF
+
+    if [[ "$TARGET_USER" == "root" ]]; then
+        cp /tmp/fcitx5_config "$config_file"
+    else
+        sudo -u "$TARGET_USER" cp /tmp/fcitx5_config "$config_file"
+    fi
+    rm /tmp/fcitx5_config
+    chown "$TARGET_USER":"$TARGET_USER" "$config_file" 2>/dev/null || true
+    print_success "Fcitx5 已配置为左 Shift 切换中英文"
 }
 
 install_fcitx5() {
     print_info "安装 Fcitx5 中文输入法..."
     run_cmd "apt install -y fcitx5 fcitx5-chinese-addons fcitx5-config-qt"
-    
+    run_cmd "im-config -s fcitx5"
     configure_chinese_locale_for_user
-    
+    configure_fcitx5_left_shift
     print_success "Fcitx5 安装完成"
 }
 
@@ -841,46 +907,51 @@ install_common_soft() {
     [[ -f "/usr/share/applications/gnome-system-monitor.desktop" ]] && create_app_desktop "系统监视器" "/usr/share/applications/gnome-system-monitor.desktop"
 }
 
-# ========== 关键修改：install_vnc 函数使用用户提供的 xstartup 模板 ==========
 install_vnc() {
     print_title "安装 TigerVNC"
     run_cmd "apt install -y tigervnc-standalone-server tigervnc-xorg-extension"
     run_cmd "mkdir -p $TARGET_HOME/.vnc/"
     
     local xstartup_path="$TARGET_HOME/.vnc/xstartup"
+    local display_num=$(port_to_display $VNC_PORT)
     
-    # 生成 xstartup 内容（按照用户提供的模板）
-    cat > /tmp/xstartup.tmp <<'EOF'
+    local im_start=""
+    local im_env=""
+    if [[ "$INPUT_METHOD_TYPE" == "fcitx5" ]]; then
+        im_env='export GTK_IM_MODULE=fcitx
+export QT_IM_MODULE=fcitx
+export XMODIFIERS="@im=fcitx"'
+        im_start='fcitx5 -d'
+    elif [[ "$INPUT_METHOD_TYPE" == "ibus" ]]; then
+        im_env='export GTK_IM_MODULE=ibus
+export QT_IM_MODULE=ibus
+export XMODIFIERS="@im=ibus"'
+        im_start='ibus-daemon -drx'
+    else
+        im_env='# No input method configured'
+        im_start='#'
+    fi
+
+    cat > /tmp/xstartup.tmp <<EOF
 #!/bin/bash
 unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
+if [ -z "\$DBUS_SESSION_BUS_ADDRESS" ]; then
+    eval "\$(dbus-launch --sh-syntax)"
+fi
 
-# Set Chinese locale
 export LANG=zh_CN.UTF-8
 export LC_ALL=zh_CN.UTF-8
+$im_env
 
-# Disable screen saver and power management
 xset s off
 xset -dpms
 xset s noblank
 
-# Start XFCE desktop
-startxfce4 &
+$DESKTOP_CMD &
 
-# Wait for XFCE to start
-sleep 5
+$im_start
 
-# Start input method if available
-if command -v fcitx5 >/dev/null 2>&1; then
-    export INPUT_METHOD=fcitx5
-    export GTK_IM_MODULE=fcitx5
-    export QT_IM_MODULE=fcitx5
-    export XMODIFIERS="@im=fcitx5"
-    fcitx5 &
-fi
-
-# Keep the session running
-exec sleep infinity
+sleep infinity
 EOF
 
     if is_root || [[ "$TARGET_USER" == "root" ]]; then
@@ -892,7 +963,6 @@ EOF
     run_cmd "chmod +x $xstartup_path"
     run_cmd "chown -R $TARGET_USER:$TARGET_USER $TARGET_HOME/.vnc/"
     
-    # 设置 VNC 密码
     if [[ -n "$VNC_PASSWORD" ]]; then
         print_info "设置 VNC 密码..."
         if [[ "$TARGET_USER" == "root" ]]; then
@@ -902,9 +972,7 @@ EOF
         fi
     fi
     
-    local display_num=$(port_to_display $VNC_PORT)
     local service_name="vncserver@$display_num.service"
-    
     cat > /tmp/vncserver.service.tmp <<EOF
 [Unit]
 Description=Remote desktop service (VNC)
@@ -923,7 +991,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-    
+
     if is_root; then
         cp /tmp/vncserver.service.tmp "/etc/systemd/system/$service_name"
     else
@@ -1145,12 +1213,10 @@ app_batch_menu() {
     esac
 }
 
-# ========== 自动安装（强制 root，自动重启）已添加输入法 ==========
 auto_install() {
     print_title "自动安装模式"
     reset_question_stack
 
-    # 强制使用 root 用户
     TARGET_USER="root"
     TARGET_HOME="/root"
     LOCKFILE="/root/vncinstall.lock"
@@ -1187,6 +1253,8 @@ auto_install() {
     INSTALL_LANG="$AUTO_INSTALL_LANG"
     INSTALL_NOVNC="$AUTO_INSTALL_NOVNC"
     NOVNC_PORT="$AUTO_NOVNC_PORT"
+    INPUT_METHOD_TYPE="fcitx5"
+    INSTALL_INPUT_METHOD="y"
 
     install_base
     install_desktop
@@ -1198,10 +1266,11 @@ auto_install() {
         esac
     }
     [[ "$INSTALL_COMMON_SOFT" == "y" ]] && install_common_soft
-    [[ "$INSTALL_VNC" == "y" ]] && install_vnc
     [[ "$INSTALL_LANG" == "y" ]] && install_language
-    # 自动安装默认安装 Fcitx5 输入法（关键修复）
-    install_fcitx5
+    if [[ "$INSTALL_INPUT_METHOD" == "y" ]]; then
+        install_fcitx5
+    fi
+    [[ "$INSTALL_VNC" == "y" ]] && install_vnc
     [[ "$INSTALL_NOVNC" == "y" ]] && install_novnc
 
     generate_lockfile
@@ -1214,25 +1283,48 @@ auto_install_summary() {
     echo -e "${CYAN}[信息] 安装用户:${NC} $TARGET_USER"
     echo -e "${CYAN}[信息] 桌面环境:${NC} $DESKTOP_TYPE"
     
+    local public_ip=$(get_public_ip)
+    local risk_warning=""
+    
     if [[ "$INSTALL_VNC" == "y" ]]; then
-        local public_ip=$(get_public_ip)
         echo -e "${CYAN}[信息] VNC 地址:${NC} $public_ip:$VNC_PORT"
         echo -e "${CYAN}[信息] VNC 密码:${NC} ${VNC_PASSWORD}"
+        if [[ "$VNC_PASSWORD" == "123456" ]]; then
+            risk_warning+="  - VNC 密码使用了默认值 123456\n"
+        fi
+    fi
+    
+    if [[ "$USER_PASS_IS_DEFAULT" == "true" ]]; then
+        risk_warning+="  - 用户 $TARGET_USER 的密码使用了默认值 123456\n"
+    fi
+    
+    if [[ -n "$risk_warning" ]]; then
+        echo -e "\n${RED}[安全警告] 以下默认密码存在严重安全风险，请立即修改：${NC}"
+        echo -e "$risk_warning"
     fi
     
     if [[ "$INSTALL_NOVNC" == "y" ]]; then
-        local public_ip=$(get_public_ip)
-        echo -e "${CYAN}[信息] noVNC 地址:${NC} http://$public_ip:$NOVNC_PORT/vnc.html"
+        echo -e "${CYAN}[信息] noVNC 地址:${NC} http://$public_ip:${NOVNC_PORT:-6080}/vnc.html"
     fi
     
-    if [[ "$BROWSER_CHOICE" != "none" ]]; then
-        echo -e "${CYAN}[信息] 浏览器:${NC} $BROWSER_CHOICE"
+    send_install_stat "$public_ip"
+    
+    local script_path="$(realpath "$0")"
+    if [[ -f "$script_path" ]]; then
+        rm -f /usr/local/bin/fantools 2>/dev/null
+        run_cmd "ln -sf $script_path /usr/local/bin/fantools"
+        run_cmd "chmod +x /usr/local/bin/fantools"
+        print_success "已创建全局命令：fantools"
     fi
     
     echo
-    print_warn "系统将在 10 秒后重启..."
-    sleep 10
-    run_cmd "reboot"
+    echo -e "${WHITE}若安装有问题，欢迎提交问题 https://github.com/fanchuanhah/auto-install-desktop-and-vnc-and-set-enable${NC}"
+    echo -e "${WHITE}或执行 ${GREEN}fantools report${WHITE} 反馈问题${NC}"
+    echo
+    print_warn "系统将在 1 分钟后自动重启（请手动断开 SSH）..."
+    run_cmd "shutdown -r +1"
+    sleep 2
+    exit 0
 }
 
 advanced_install() {
@@ -1482,7 +1574,7 @@ advanced_install() {
 
             "input_method_choice")
                 echo "是否安装中文输入法？"
-                echo " 1) 安装 Fcitx5 (推荐)"
+                echo " 1) 安装 Fcitx5 (推荐，左Shift切换中英文)"
                 echo " 2) 安装 IBus"
                 echo " 3) 不安装"
                 im_choice=$(ask_input "请输入数字 (1-3)" "select_input_method" "1")
@@ -1544,9 +1636,7 @@ advanced_install() {
                     fi
                 fi
                 [[ "$INSTALL_COMMON_SOFT" == "y" ]] && install_common_soft
-                if [[ "$INSTALL_VNC" == "y" ]]; then
-                    install_vnc
-                fi
+                [[ "$INSTALL_VNC" == "y" ]] && install_vnc
                 [[ "$INSTALL_LANG" == "y" ]] && install_language
                 [[ "$INSTALL_NOVNC" == "y" ]] && install_novnc
                 
@@ -1564,23 +1654,45 @@ show_install_summary() {
     echo -e "${CYAN}[信息] 安装用户:${NC} $TARGET_USER"
     echo -e "${CYAN}[信息] 桌面环境:${NC} $DESKTOP_TYPE"
     
+    local public_ip=$(get_public_ip)
+    local risk_warning=""
+    
     if [[ "$INSTALL_VNC" == "y" ]]; then
-        local public_ip=$(get_public_ip)
         echo -e "${CYAN}[信息] VNC 地址:${NC} $public_ip:$VNC_PORT"
         echo -e "${CYAN}[信息] VNC 密码:${NC} ${VNC_PASSWORD}"
-        echo -e "${YELLOW}[注意] VNC 密码保存在锁文件中，关闭SSH后仍可使用${NC}"
+        if [[ "$VNC_PASSWORD" == "123456" ]]; then
+            risk_warning+="  - VNC 密码使用了默认值 123456\n"
+        fi
+    fi
+    
+    if [[ "$USER_PASS_IS_DEFAULT" == "true" ]]; then
+        risk_warning+="  - 用户 $TARGET_USER 的密码使用了默认值 123456\n"
+    fi
+    
+    if [[ -n "$risk_warning" ]]; then
+        echo -e "\n${RED}[安全警告] 以下默认密码存在严重安全风险，请立即修改：${NC}"
+        echo -e "$risk_warning"
     fi
     
     if [[ "$INSTALL_NOVNC" == "y" ]]; then
-        local public_ip=$(get_public_ip)
         echo -e "${CYAN}[信息] noVNC 地址:${NC} http://$public_ip:${NOVNC_PORT:-6080}/vnc.html"
     fi
     
-    if [[ "$BROWSER_CHOICE" != "none" ]]; then
-        echo -e "${CYAN}[信息] 浏览器:${NC} $BROWSER_CHOICE"
+    send_install_stat "$public_ip"
+    
+    local script_path="$(realpath "$0")"
+    if [[ -f "$script_path" ]]; then
+        rm -f /usr/local/bin/fantools 2>/dev/null
+        run_cmd "ln -sf $script_path /usr/local/bin/fantools"
+        run_cmd "chmod +x /usr/local/bin/fantools"
+        print_success "已创建全局命令：fantools"
     fi
     
     echo
+    echo -e "${WHITE}若安装有问题，欢迎提交问题 https://github.com/fanchuanhah/auto-install-desktop-and-vnc-and-set-enable${NC}"
+    echo -e "${WHITE}或执行 ${GREEN}fantools report${WHITE} 反馈问题${NC}"
+    echo
+    
     echo -e "${WHITE}请选择后续操作:${NC}"
     echo "  1) 立即重启系统"
     echo "  2) 返回主菜单"
@@ -1589,9 +1701,10 @@ show_install_summary() {
     read -p "请输入选项 [1-3]: " -r choice
     case $choice in
         1)
-            print_warn "系统将在 10 秒后重启..."
-            sleep 10
-            run_cmd "reboot"
+            print_warn "系统将在 1 分钟后自动重启..."
+            run_cmd "shutdown -r +1"
+            sleep 2
+            exit 0
             ;;
         2)
             print_info "返回主菜单..."
@@ -1633,10 +1746,11 @@ uninstall_management() {
     echo "  4) 卸载浏览器"
     echo "  5) 卸载应用程序"
     echo "  6) 完整卸载"
+    echo "  7) 删除目标用户（谨慎）"
     echo "  0) 返回主菜单"
     echo
     
-    uninstall_type=$(ask_input "请输入数字 [0-6]" "select_uninstall_type" "")
+    uninstall_type=$(ask_input "请输入数字 [0-7]" "select_uninstall_type" "")
     local res=$?
     if [[ $res -eq 1 ]]; then
         BACK_TO_PREV=0
@@ -1820,7 +1934,27 @@ uninstall_management() {
             
             print_success "完整卸载完成！"
             ;;
-            
+        7)
+            if [[ -z "$TARGET_USER" ]]; then
+                print_error "未找到目标用户，请先选择安装记录或手动输入"
+                return
+            fi
+            if [[ "$TARGET_USER" == "root" ]]; then
+                print_error "无法删除 root 用户"
+                return
+            fi
+            if [[ "$TARGET_USER" == "$(whoami)" ]]; then
+                print_error "不能删除当前登录用户"
+                return
+            fi
+            confirm_action "确认删除用户 $TARGET_USER 及其家目录" "del_user"
+            if [[ $? -eq 0 ]]; then
+                run_cmd "userdel -r $TARGET_USER"
+                print_success "用户 $TARGET_USER 已删除"
+                TARGET_USER=""
+                LOCKFILE=""
+            fi
+            ;;
         0) return ;;
     esac
     
@@ -1904,7 +2038,11 @@ service_management() {
                 else
                     runuser -l "$TARGET_USER" -c "printf '%s\n%s\nn\n' \"$new_vnc_pass\" \"$new_vnc_pass\" | vncpasswd >/dev/null 2>&1"
                 fi
-                VNC_PASSWORD="$new_vnc_pass"
+                if [[ "$new_vnc_pass" == "123456" ]]; then
+                    VNC_PASSWORD="123456"
+                else
+                    VNC_PASSWORD="custom"
+                fi
                 generate_lockfile
                 print_success "VNC 密码修改成功"
                 break
@@ -1916,7 +2054,11 @@ service_management() {
             echo "安装用户: $TARGET_USER"
             echo "公网 IP: $public_ip"
             echo "VNC 端口: $VNC_PORT"
-            echo "VNC 密码: $VNC_PASSWORD"
+            if [[ "$VNC_PASSWORD" == "123456" ]]; then
+                echo "VNC 密码: $VNC_PASSWORD"
+            else
+                echo "VNC 密码: ******（自定义，已隐藏）"
+            fi
             if [[ "$INSTALL_NOVNC" == "y" ]]; then
                 echo "noVNC 地址: http://$public_ip:${NOVNC_PORT:-6080}/vnc.html"
             fi
@@ -1929,12 +2071,23 @@ service_management() {
     read -p "按回车键返回主菜单..." -r
 }
 
-main_menu() {
-    if [[ -n "$LOCKFILE" && -f "$LOCKFILE" ]]; then
-        INSTALLED=true
-    else
-        INSTALLED=false
+report_issue() {
+    clear_screen
+    print_title "问题反馈"
+    echo "请输入您遇到的问题描述（输入完成后按回车提交）："
+    read -p "> " issue_text
+    if [[ -z "$issue_text" ]]; then
+        print_warn "输入为空，已取消反馈。"
+        return
     fi
+    local public_ip=$(get_public_ip)
+    send_feedback "$public_ip" "$issue_text"
+    read -p "按回车键继续..." -r
+}
+
+main_menu() {
+    INSTALLED=false
+    [[ -n "$LOCKFILE" && -f "$LOCKFILE" ]] && INSTALLED=true
 
     while true; do
         clear_screen
@@ -1952,25 +2105,14 @@ main_menu() {
         echo "  5) 卸载管理"
         echo "  6) 服务管理"
         echo "  7) 查看系统信息"
+        echo "  8) 反馈问题"
         echo "  0) 退出脚本"
         echo -e "${WHITE}=====================${NC}"
         
-        read -p "请输入选项 [0-7]: " main_choice
+        read -p "请输入选项 [0-8]: " main_choice
         case $main_choice in
-            1)
-                if [[ "$INSTALLED" == false ]]; then
-                    auto_install
-                else
-                    print_error "无效选项"
-                fi
-                ;;
-            2)
-                if [[ "$INSTALLED" == false ]]; then
-                    advanced_install
-                else
-                    print_error "无效选项"
-                fi
-                ;;
+            1) [[ "$INSTALLED" == false ]] && auto_install || print_error "无效选项" ;;
+            2) [[ "$INSTALLED" == false ]] && advanced_install || print_error "无效选项" ;;
             3) install_apps_menu ;;
             4) app_batch_menu ;;
             5) uninstall_management ;;
@@ -1980,13 +2122,10 @@ main_menu() {
                 run_cmd "neofetch 2>/dev/null || cat /etc/os-release | head -n 2"
                 echo "公网 IP: $(get_public_ip)"
                 echo "当前目标用户: $TARGET_USER"
-                if check_lockfile; then
-                    echo "检测到安装记录: $LOCKFILE"
-                else
-                    echo "未检测到安装记录"
-                fi
+                check_lockfile && echo "检测到安装记录: $LOCKFILE" || echo "未检测到安装记录"
                 read -p "按回车键返回主菜单..." -r
                 ;;
+            8) report_issue ;;
             0)
                 print_info "感谢使用，脚本退出！"
                 exit 0
@@ -1996,7 +2135,72 @@ main_menu() {
     done
 }
 
+# ========== 命令行参数处理 ==========
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    if [[ $# -gt 0 ]]; then
+        case "$1" in
+            restartvnc|restart|r)
+                LOCKFILE=""
+                detect_existing_lockfile
+                [[ -z "$LOCKFILE" ]] && print_error "未找到安装记录" && exit 1
+                read_lockfile
+                [[ -z "$VNC_PORT" ]] && print_error "锁文件中无 VNC 端口信息" && exit 1
+                display_num=$(port_to_display $VNC_PORT)
+                service_name="vncserver@$display_num.service"
+                echo "正在重启 VNC 服务: $service_name"
+                run_cmd "systemctl restart $service_name"
+                systemctl is-active --quiet "$service_name" && print_success "VNC 服务已重启。" || print_error "重启失败"
+                ;;
+            status|s)
+                detect_existing_lockfile
+                [[ -z "$LOCKFILE" ]] && print_error "未找到安装记录" && exit 1
+                read_lockfile
+                display_num=$(port_to_display $VNC_PORT)
+                service_name="vncserver@$display_num.service"
+                systemctl status "$service_name" --no-pager
+                ;;
+            stop)
+                detect_existing_lockfile
+                [[ -z "$LOCKFILE" ]] && print_error "未找到安装记录" && exit 1
+                read_lockfile
+                display_num=$(port_to_display $VNC_PORT)
+                service_name="vncserver@$display_num.service"
+                run_cmd "systemctl stop $service_name"
+                print_info "VNC 服务已停止"
+                ;;
+            start)
+                detect_existing_lockfile
+                [[ -z "$LOCKFILE" ]] && print_error "未找到安装记录" && exit 1
+                read_lockfile
+                display_num=$(port_to_display $VNC_PORT)
+                service_name="vncserver@$display_num.service"
+                run_cmd "systemctl start $service_name"
+                print_info "VNC 服务已启动"
+                ;;
+            report)
+                report_issue
+                ;;
+            help|--help|-h)
+                echo "用法: fantools [命令]"
+                echo "命令:"
+                echo "  restartvnc (或 restart, r)  一键重启 VNC 服务"
+                echo "  status (s)                  查看 VNC 服务状态"
+                echo "  start                       启动 VNC 服务"
+                echo "  stop                        停止 VNC 服务"
+                echo "  report                      反馈问题"
+                echo "  help                        显示本帮助"
+                echo "无参数运行时进入交互式主菜单。"
+                exit 0
+                ;;
+            *)
+                print_error "未知参数: $1"
+                echo "使用 'fantools help' 查看可用命令。"
+                exit 1
+                ;;
+        esac
+        exit 0
+    fi
+
     if ! is_root && ! has_sudo; then
         print_error "当前用户无 sudo 权限"
         exit 1
